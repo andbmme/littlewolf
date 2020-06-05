@@ -1,5 +1,7 @@
 #include <SDL2/SDL.h>
 #include <math.h>
+#include <stdbool.h>
+#include <stdio.h>
 
 typedef struct
 {
@@ -10,7 +12,7 @@ Point;
 
 typedef struct
 {
-    char tile;
+    int tile;
     Point where;
 }
 Hit;
@@ -66,89 +68,72 @@ typedef struct
 }
 Map;
 
+// Rotates the player by some radian value.
 static Point turn(const Point a, const float t)
 {
-    const Point b = {
-        a.x * cosf(t) - a.y * sinf(t),
-        a.x * sinf(t) + a.y * cosf(t),
-    };
+    const Point b = { a.x * cosf(t) - a.y * sinf(t), a.x * sinf(t) + a.y * cosf(t) };
     return b;
 }
 
-// Right angle rotation.
+// Rotates a point 90 degrees.
 static Point rag(const Point a)
 {
-    const Point b = {
-        -a.y,
-        +a.x,
-    };
+    const Point b = { -a.y, a.x };
     return b;
 }
 
+// Subtracts two points.
 static Point sub(const Point a, const Point b)
 {
-    const Point c = {
-        a.x - b.x,
-        a.y - b.y,
-    };
+    const Point c = { a.x - b.x, a.y - b.y };
     return c;
 }
 
+// Adds two points.
 static Point add(const Point a, const Point b)
 {
-    const Point c = {
-        a.x + b.x,
-        a.y + b.y,
-    };
+    const Point c = { a.x + b.x, a.y + b.y };
     return c;
 }
 
+// Multiplies a point by a scalar value.
 static Point mul(const Point a, const float n)
 {
-    const Point b = {
-        a.x * n,
-        a.y * n,
-    };
+    const Point b = { a.x * n, a.y * n };
     return b;
 }
 
+// Returns the magnitude of a point.
 static float mag(const Point a)
 {
     return sqrtf(a.x * a.x + a.y * a.y);
 }
 
-static Point dvd(const Point a, const float n)
+// Returns the unit vector of a point.
+static Point unit(const Point a)
 {
-    const Point b = {
-        a.x / n,
-        a.y / n,
-    };
-    return b;
+    return mul(a, 1.0f / mag(a));
 }
 
-static Point unt(const Point a)
-{
-    return dvd(a, mag(a));
-}
-
+// Returns the slope of a point.
 static float slope(const Point a)
 {
     return a.y / a.x;
 }
 
-// Fast floor (math).
+// Fast floor (math.h is too slow).
 static int fl(const float x)
 {
     return (int) x - (x < (int) x);
 }
 
-// Fast ceil (math).
+// Fast ceil (math.h is too slow).
 static int cl(const float x)
 {
     return (int) x + (x > (int) x);
 }
 
-// Steps horizontally along a grid.
+// Steps horizontally along a square grid.
 static Point sh(const Point a, const Point b)
 {
     const float x = b.x > 0.0f ? fl(a.x + 1.0f) : cl(a.x - 1.0f);
@@ -157,7 +142,7 @@ static Point sh(const Point a, const Point b)
     return c;
 }
 
-// Steps vertically along a grid.
+// Steps vertically along a square grid.
 static Point sv(const Point a, const Point b)
 {
     const float y = b.y > 0.0f ? fl(a.y + 1.0f) : cl(a.y - 1.0f);
@@ -166,12 +151,8 @@ static Point sv(const Point a, const Point b)
     return c;
 }
 
-static Point cmp(const Point a, const Point b, const Point c)
-{
-    return mag(sub(b, a)) < mag(sub(c, a)) ? b : c;
-}
-
-static char tile(const Point a, const char** const tiles)
+// Returns a decimal value of the ascii tile value on the map.
+static int tile(const Point a, const char** const tiles)
 {
     const int x = a.x;
     const int y = a.y;
@@ -184,31 +165,43 @@ static float dec(const float x)
     return x - (int) x;
 }
 
+// Casts a ray from <where> in unit <direction> until a <walling> tile is hit.
 static Hit cast(const Point where, const Point direction, const char** const walling)
 {
+    // Determine whether to step horizontally or vertically on the grid.
     const Point hor = sh(where, direction);
     const Point ver = sv(where, direction);
-    const Point ray = cmp(where, hor, ver);
-    const Point delta = mul(direction, 0.01f);
-    const Point dx = { delta.x, 0.0f };
-    const Point dy = { 0.0f, delta.y };
-    const Point test = add(ray, mag(sub(hor, ver)) < 0.01f ? delta : dec(ray.x) == 0.0f ? dx : dy);
-    const Hit hit = { tile(test, walling), test };
+    const Point ray = mag(sub(hor, where)) < mag(sub(ver, where)) ? hor : ver;
+    // Due to floating point error, the step may not make it to the next grid square.
+    // Three directions (dy, dx, dc) of a tiny step will be added to the ray
+    // depending on if the ray hit a horizontal wall, a vertical wall, or the corner
+    // of two walls, respectively.
+    const Point dc = mul(direction, 0.01f);
+    const Point dx = { dc.x, 0.0f };
+    const Point dy = { 0.0f, dc.y };
+    const Point test = add(ray,
+        // Tiny step for corner of two grid squares.
+        mag(sub(hor, ver)) < 1e-3f ? dc :
+        // Tiny step for vertical grid square.
+        dec(ray.x) == 0.0f ? dx :
+        // Tiny step for a horizontal grid square.
+        dy);
+    const Hit hit = { tile(test, walling), ray };
+    // If a wall was not hit, then continue advancing the ray.
     return hit.tile ? hit : cast(ray, direction, walling);
 }
 
-// Party casting (flooring and ceiling)
+// Party casting. Returns a percentage of <y> related to <yres> for ceiling and
+// floor casting when lerping the floor or ceiling.
 static float pcast(const float size, const int yres, const int y)
 {
     return size / (2 * (y + 1) - yres);
 }
 
+// Rotates a line by some radian amount.
 static Line rotate(const Line l, const float t)
 {
-    const Line line = {
-        turn(l.a, t),
-        turn(l.b, t),
-    };
+    const Line line = { turn(l.a, t), turn(l.b, t) };
     return line;
 }
 
@@ -218,29 +211,50 @@ static Point lerp(const Line l, const float n)
     return add(l.a, mul(sub(l.b, l.a), n));
 }
 
-static Gpu setup(const int xres, const int yres)
+// Setups the software gpu.
+static Gpu setup(const int xres, const int yres, const bool vsync)
 {
     SDL_Init(SDL_INIT_VIDEO);
-    SDL_Window* const window = SDL_CreateWindow("littlewolf", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, xres, yres, SDL_WINDOW_SHOWN);
-    SDL_Renderer* const renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-    // Notice the flip between xres and yres. The texture is 90 degrees flipped on its side for fast cache access.
-    SDL_Texture* const texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, yres, xres);
+    SDL_Window* const window = SDL_CreateWindow(
+        "littlewolf",
+        SDL_WINDOWPOS_UNDEFINED,
+        SDL_WINDOWPOS_UNDEFINED,
+        xres, yres,
+        SDL_WINDOW_SHOWN);
+    SDL_Renderer* const renderer = SDL_CreateRenderer(
+        window,
+        -1,
+        SDL_RENDERER_ACCELERATED | (vsync ? SDL_RENDERER_PRESENTVSYNC : 0x0));
+    // Notice the flip between xres and yres.
+    // The texture is 90 degrees flipped on its side for fast cache access.
+    SDL_Texture* const texture = SDL_CreateTexture(
+        renderer,
+        SDL_PIXELFORMAT_ARGB8888,
+        SDL_TEXTUREACCESS_STREAMING,
+        yres, xres);
+    if(window == NULL || renderer == NULL || texture == NULL)
+    {
+        puts(SDL_GetError());
+        exit(1);
+    }
     const Gpu gpu = { window, renderer, texture, xres, yres };
     return gpu;
 }
 
+// Presents the software gpu to the window.
+// Calls the real GPU to rotate texture back 90 degrees before presenting.
 static void present(const Gpu gpu)
 {
     const SDL_Rect dst = {
         (gpu.xres - gpu.yres) / 2,
         (gpu.yres - gpu.xres) / 2,
-        gpu.yres,
-        gpu.xres,
+        gpu.yres, gpu.xres,
     };
     SDL_RenderCopyEx(gpu.renderer, gpu.texture, NULL, &dst, -90, NULL, SDL_FLIP_NONE);
     SDL_RenderPresent(gpu.renderer);
 }
 
+// Locks the gpu, returning a pointer to video memory.
 static Display lock(const Gpu gpu)
 {
     void* screen;
@@ -250,25 +264,19 @@ static Display lock(const Gpu gpu)
     return display;
 }
 
+// Places a pixels in gpu video memory.
 static void put(const Display display, const int x, const int y, const uint32_t pixel)
 {
     display.pixels[y + x * display.width] = pixel;
 }
 
+// Unlocks the gpu, making the pointer to video memory ready for presentation
 static void unlock(const Gpu gpu)
 {
     SDL_UnlockTexture(gpu.texture);
 }
 
-static Wall project(const int xres, const int yres, const Line fov, const Point corrected)
-{
-    const float size = 0.5f * fov.a.x * xres / (corrected.x < 1e-2f ? 1e-2f : corrected.x);
-    const int top = (yres + size) / 2.0f;
-    const int bot = (yres - size) / 2.0f;
-    const Wall wall = { top > yres ? yres : top, bot < 0 ? 0 : bot, size };
-    return wall;
-}
-
+// Spins the hero when keys h,l are held down.
 static Hero spin(Hero hero, const uint8_t* key)
 {
     if(key[SDL_SCANCODE_H]) hero.theta -= 0.1f;
@@ -276,10 +284,11 @@ static Hero spin(Hero hero, const uint8_t* key)
     return hero;
 }
 
+// Moves the hero when w,a,s,d are held down. Handles collision detection for the walls.
 static Hero move(Hero hero, const char** const walling, const uint8_t* key)
 {
     const Point last = hero.where, zero = { 0.0f, 0.0f };
-    // Accelerates if <WASD>.
+    // Accelerates with key held down.
     if(key[SDL_SCANCODE_W] || key[SDL_SCANCODE_S] || key[SDL_SCANCODE_D] || key[SDL_SCANCODE_A])
     {
         const Point reference = { 1.0f, 0.0f };
@@ -293,8 +302,8 @@ static Hero move(Hero hero, const char** const walling, const uint8_t* key)
     // Otherwise, decelerates (exponential decay).
     else hero.velocity = mul(hero.velocity, 1.0f - hero.acceleration / hero.speed);
     // Caps velocity if top speed is exceeded.
-    if(mag(hero.velocity) > hero.speed) hero.velocity = mul(unt(hero.velocity), hero.speed);
-    // Moves
+    if(mag(hero.velocity) > hero.speed) hero.velocity = mul(unit(hero.velocity), hero.speed);
+    // Moves.
     hero.where = add(hero.where, hero.velocity);
     // Sets velocity to zero if there is a collision and puts hero back in bounds.
     if(tile(hero.where, walling))
@@ -305,25 +314,47 @@ static Hero move(Hero hero, const char** const walling, const uint8_t* key)
     return hero;
 }
 
-static uint32_t color(const char tile)
+// Returns a color value (RGB) from a decimal tile value.
+static uint32_t color(const int tile)
 {
-    return 0xAA << (8 * (tile - 1));
+    switch(tile)
+    {
+    default:
+    case 1: return 0x00AA0000; // Red.
+    case 2: return 0x0000AA00; // Green.
+    case 3: return 0x000000AA; // Blue.
+    }
 }
 
+// Calculates wall size using the <corrected> ray to the wall.
+static Wall project(const int xres, const int yres, const float focal, const Point corrected)
+{
+    // Normal distance of corrected ray is clamped to some small value else wall size will shoot to infinity.
+    const float normal = corrected.x < 1e-2f ? 1e-2f : corrected.x;
+    const float size = 0.5f * focal * xres / normal;
+    const int top = (yres + size) / 2.0f;
+    const int bot = (yres - size) / 2.0f;
+    // Top and bottom values are clamped to screen size else renderer will waste cycles
+    // (or segfault) when rasterizing pixels off screen.
+    const Wall wall = { top > yres ? yres : top, bot < 0 ? 0 : bot, size };
+    return wall;
+}
+
+// Renders the entire scene from the <hero> perspective given a <map> and a software <gpu>.
 static void render(const Hero hero, const Map map, const Gpu gpu)
 {
     const int t0 = SDL_GetTicks();
     const Line camera = rotate(hero.fov, hero.theta);
     const Display display = lock(gpu);
+    // Ray cast for all columns of the window.
     for(int x = 0; x < gpu.xres; x++)
     {
-        // Casts a ray.
-        const Point column = lerp(camera, x / (float) gpu.xres);
-        const Hit hit = cast(hero.where, column, map.walling);
+        const Point direction = lerp(camera, x / (float) gpu.xres);
+        const Hit hit = cast(hero.where, direction, map.walling);
         const Point ray = sub(hit.where, hero.where);
-        const Point corrected = turn(ray, -hero.theta);
-        const Wall wall = project(gpu.xres, gpu.yres, hero.fov, corrected);
         const Line trace = { hero.where, hit.where };
+        const Point corrected = turn(ray, -hero.theta);
+        const Wall wall = project(gpu.xres, gpu.yres, hero.fov.a.x, corrected);
         // Renders flooring.
         for(int y = 0; y < wall.bot; y++)
             put(display, x, y, color(tile(lerp(trace, -pcast(wall.size, gpu.yres, y)), map.floring)));
@@ -336,13 +367,13 @@ static void render(const Hero hero, const Map map, const Gpu gpu)
     }
     unlock(gpu);
     present(gpu);
-    // Caps frame rate.
+    // Caps frame rate to ~60 fps if the vertical sync (VSYNC) init failed.
     const int t1 = SDL_GetTicks();
-    const int ms = 15 - (t1 - t0);
+    const int ms = 16 - (t1 - t0);
     SDL_Delay(ms < 0 ? 0 : ms);
 }
 
-static int done()
+static bool done()
 {
     SDL_Event event;
     SDL_PollEvent(&event);
@@ -351,6 +382,7 @@ static int done()
         || event.key.keysym.sym == SDLK_ESCAPE;
 }
 
+// Changes the field of view. A focal value of 1.0 is 90 degrees.
 static Line viewport(const float focal)
 {
     const Line fov = {
@@ -360,10 +392,10 @@ static Line viewport(const float focal)
     return fov;
 }
 
-static Hero born()
+static Hero born(const float focal)
 {
     const Hero hero = {
-        viewport(0.8f),
+        viewport(focal),
         // Where.
         { 3.5f, 3.5f },
         // Velocity.
@@ -372,15 +404,15 @@ static Hero born()
         0.10f,
         // Acceleration.
         0.015f,
-        // Theta (Radians).
+        // Theta radians.
         0.0f
     };
     return hero;
 }
 
+// Builds the map. Note the static prefix for the parties. Map lives in .bss in private.
 static Map build()
 {
-    // Note the static. Map lives in .bss in private.
     static const char* ceiling[] = {
         "111111111111111111111111111111111111111111111",
         "122223223232232111111111111111222232232322321",
@@ -412,13 +444,14 @@ static Map build()
     return map;
 }
 
+// Get Psyched!
 int main(int argc, char* argv[])
 {
     (void) argc;
     (void) argv;
-    const Gpu gpu = setup(700, 400);
+    const Gpu gpu = setup(700, 400, true);
     const Map map = build();
-    Hero hero = born();
+    Hero hero = born(0.8f);
     while(!done())
     {
         const uint8_t* key = SDL_GetKeyboardState(NULL);
@@ -426,5 +459,6 @@ int main(int argc, char* argv[])
         hero = move(hero, map.walling, key);
         render(hero, map, gpu);
     }
+    // No need to free anything - gives quick exit.
     return 0;
 }
